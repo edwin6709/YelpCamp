@@ -65,7 +65,7 @@ dist
 
 # Gatsby files
 .cache/
-public
+# public - commented out 03/12/26
 
 # Vue.js dist
 dist/
