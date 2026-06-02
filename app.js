@@ -24,13 +24,15 @@ const userRoutes = require('./routes/users');
 const campgroundRoutes = require('./routes/campgrounds');
 const reviewRoutes = require('./routes/reviews');
 
-mongoose.connect(dbUrl)
+let dbConnectionPromise = null;
+const connectDB = () => {
+    if (mongoose.connection.readyState >= 1) return Promise.resolve();
+    if (!dbConnectionPromise) dbConnectionPromise = mongoose.connect(dbUrl);
+    return dbConnectionPromise;
+};
 
-const db = mongoose.connection;
-db.on("error", console.error.bind(console, "connection error:"));
-db.once("open", () => {
-    console.log("Database connected");
-});
+mongoose.connection.on("error", console.error.bind(console, "connection error:"));
+mongoose.connection.once("open", () => console.log("Database connected"));
 
 const app = express();
 app.set('query parser', 'extended');
@@ -42,6 +44,8 @@ app.set('views', path.join(__dirname, 'views'))
 app.use(express.urlencoded({ extended: true }));
 app.use(methodOverride('_method'));
 app.use(express.static(path.join(__dirname, 'public')))
+
+app.use((req, res, next) => { connectDB().then(() => next()).catch(next); });
 
 app.use(sanitizeV5({ replaceWith: '_' }));
 
