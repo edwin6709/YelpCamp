@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>How YelpCamp Uses Cloudinary</title>
+<style>
+  @page {
+    size: letter;
+    margin: 0.9in 0.85in;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #1f2933;
+    font-size: 11.5px;
+    line-height: 1.65;
+    margin: 0;
+  }
+  header {
+    border-bottom: 3px solid #2f6f4f;
+    padding-bottom: 14px;
+    margin-bottom: 26px;
+  }
+  h1 {
+    font-size: 26px;
+    margin: 0 0 6px 0;
+    color: #14352a;
+    letter-spacing: -0.3px;
+  }
+  .subtitle {
+    font-size: 13px;
+    color: #52606d;
+    margin: 0;
+  }
+  h2 {
+    font-size: 16px;
+    color: #14352a;
+    border-bottom: 1px solid #d3dcd7;
+    padding-bottom: 4px;
+    margin: 26px 0 10px 0;
+    page-break-after: avoid;
+    break-after: avoid;
+  }
+  h3 {
+    font-size: 12.5px;
+    color: #2f6f4f;
+    margin: 16px 0 6px 0;
+    page-break-after: avoid;
+    break-after: avoid;
+  }
+  p { margin: 0 0 9px 0; }
+  code {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 10px;
+    background: #eef2ef;
+    border-radius: 3px;
+    padding: 1px 4px;
+    color: #1d3b2f;
+  }
+  pre {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 9.5px;
+    line-height: 1.5;
+    background: #f4f7f5;
+    border: 1px solid #d8e0da;
+    border-left: 3px solid #2f6f4f;
+    border-radius: 4px;
+    padding: 10px 12px;
+    overflow-x: hidden;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    page-break-inside: avoid;
+    break-inside: avoid;
+    margin: 8px 0 12px 0;
+  }
+  pre code { background: none; padding: 0; font-size: 9.5px; }
+  .filelabel {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 9px;
+    color: #52606d;
+    margin-bottom: -6px;
+    margin-top: 10px;
+  }
+  .callout {
+    background: #fdf6e3;
+    border: 1px solid #e8d9a8;
+    border-left: 3px solid #c9a227;
+    border-radius: 4px;
+    padding: 9px 12px;
+    margin: 10px 0 12px 0;
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+  .callout strong { color: #7a5d0e; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 10px 0 14px 0;
+    font-size: 10.5px;
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+  th, td {
+    border: 1px solid #cfd8d2;
+    padding: 6px 9px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: #e7efe9; color: #14352a; }
+  ol, ul { margin: 0 0 10px 0; padding-left: 22px; }
+  li { margin-bottom: 4px; }
+  .diagram-page {
+    page-break-before: always;
+    break-before: page;
+  }
+  .diagram-block {
+    page-break-inside: avoid;
+    break-inside: avoid;
+    margin-bottom: 22px;
+  }
+  .diagram-block h3 {
+    font-size: 13px;
+    margin-bottom: 4px;
+  }
+  .diagram-caption {
+    font-size: 10px;
+    color: #52606d;
+    margin-top: 2px;
+  }
+  svg { width: 100%; height: auto; display: block; }
+  footer {
+    margin-top: 30px;
+    padding-top: 8px;
+    border-top: 1px solid #d3dcd7;
+    font-size: 9px;
+    color: #7b8794;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>How YelpCamp Uses Cloudinary</h1>
+  <p class="subtitle">Media upload, storage, rendering, and deletion &mdash; a walkthrough of the full image lifecycle &bull; July&nbsp;2026</p>
+</header>
+
+<h2>1. Overview</h2>
+<p>
+YelpCamp never stores image files on its own server or in its database. Instead, it uses <strong>Cloudinary</strong> as a dedicated media platform: every photo a user attaches to a campground is streamed directly to Cloudinary, which hosts the binary file and serves it back over its global CDN. What YelpCamp keeps in <strong>MongoDB</strong> is only a lightweight <em>reference</em> to each image &mdash; two strings: the image's public delivery <code>url</code> and its Cloudinary <code>filename</code> (the "public ID"). The URL is used to display the image in the browser; the filename is kept so the asset can be deleted from Cloudinary later.
+</p>
+<p>
+This separation of responsibilities is the core idea to understand: <strong>Cloudinary owns the pixels, MongoDB owns the pointers.</strong> The Express application sits in the middle and coordinates the two &mdash; it forwards uploads to Cloudinary, saves the returned references into Mongo, embeds the URLs into rendered pages, and, on deletion, removes the asset from Cloudinary first and then pulls the reference out of Mongo.
+</p>
+
+<h2>2. Configuration</h2>
+<p>
+All Cloudinary wiring lives in a single module, <code>cloudinary/index.js</code>. It does two things. First, it configures the official Cloudinary SDK using three environment variables (kept out of source control in <code>.env</code> and loaded by <code>dotenv</code> at the top of <code>app.js</code>): <code>CLOUDINARY_CLOUD_NAME</code>, <code>CLOUDINARY_KEY</code>, and <code>CLOUDINARY_SECRET</code>. These credentials identify the account and authorize write operations such as uploads and deletions.
+</p>
+<p>
+Second, it creates a <code>CloudinaryStorage</code> instance from the <code>multer-storage-cloudinary</code> package. This is a <em>storage engine for multer</em> (the Express middleware that parses file uploads). It tells multer: instead of writing incoming files to local disk, stream them straight to Cloudinary, place them inside a folder named <code>YelpCamp</code>, and only accept <code>jpeg</code>, <code>png</code>, and <code>jpg</code> formats.
+</p>
+<div class="filelabel">cloudinary/index.js</div>
+<pre><code>const cloudinary = require('cloudinary').v2;
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+
+cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_KEY,
+    api_secret: process.env.CLOUDINARY_SECRET
+});
+
+const storage = new CloudinaryStorage({
+    cloudinary,
+    params: {
+        folder: 'YelpCamp',
+        allowedFormats: ['jpeg', 'png', 'jpg']
+    }
+});
+
+module.exports = { cloudinary, storage }</code></pre>
+<p>
+The module exports both objects: <code>storage</code> is consumed by the routes (for uploads), and the configured <code>cloudinary</code> instance is consumed by the campgrounds controller (for deletions).
+</p>
+
+<h2>3. Uploading images</h2>
+<p>
+The upload journey starts in the browser. Both the "new campground" form (<code>views/campgrounds/new.ejs</code>) and the edit form declare <code>enctype="multipart/form-data"</code> &mdash; without this attribute the browser would not transmit file contents at all. The file picker is named <code>image</code> and carries the <code>multiple</code> attribute, so a user can attach several photos in one submission:
+</p>
+<div class="filelabel">views/campgrounds/new.ejs</div>
+<pre><code>&lt;form action="/campgrounds" method="POST" novalidate class="validated-form" enctype="multipart/form-data"&gt;
+    ...
+    &lt;input class="form-control" type="file" id="image" name="image" multiple&gt;</code></pre>
+<p>
+On the server, <code>routes/campgrounds.js</code> constructs a multer instance backed by the Cloudinary storage engine and mounts it as route middleware:
+</p>
+<div class="filelabel">routes/campgrounds.js</div>
+<pre><code>const multer = require('multer');
+const { storage } = require('../cloudinary');
+const upload = multer({ storage });
+
+router.route('/')
+    .get(catchAsync(campgrounds.index))
+    .post(isLoggedIn, upload.array('image'), validateCampground, catchAsync(campgrounds.createCampground));</code></pre>
+<p>
+The middleware chain order matters and is worth being able to narrate:
+</p>
+<ol>
+  <li><code>isLoggedIn</code> &mdash; rejects unauthenticated users before any file is processed.</li>
+  <li><code>upload.array('image')</code> &mdash; multer parses the multipart body. Because its storage engine is <code>CloudinaryStorage</code>, each file is <em>streamed to Cloudinary at this moment</em>, before the controller ever runs. Cloudinary stores the binary in the <code>YelpCamp</code> folder and responds with the asset's details. Multer then populates <code>req.files</code> (an array, one entry per file) and <code>req.body</code> (the text fields).</li>
+  <li><code>validateCampground</code> &mdash; Joi schema validation of the now-parsed text fields.</li>
+  <li><code>createCampground</code> &mdash; the controller, which finally persists the campground.</li>
+</ol>
+<p>
+Each entry in <code>req.files</code> carries two properties the app cares about: <code>path</code>, which is the full HTTPS delivery URL of the freshly uploaded asset, and <code>filename</code>, which is the Cloudinary public ID (including the folder prefix, e.g. <code>YelpCamp/ab12cd34</code>). The controller maps those onto the campground document:
+</p>
+<div class="filelabel">controllers/campgrounds.js &mdash; createCampground</div>
+<pre><code>const campground = new Campground(req.body.campground);
+campground.geometry = geoData.body.features[0].geometry;
+campground.images = req.files.map(f =&gt; ({ url: f.path, filename: f.filename }));
+campground.author = req.user._id;
+await campground.save();</code></pre>
+<p>
+So by the time <code>campground.save()</code> runs, the images already live on Cloudinary; Mongo receives only the URL/filename pairs.
+</p>
+
+<h2>4. Storing image references in MongoDB</h2>
+<p>
+The Campground model (<code>models/campground.js</code>) defines a small embedded subdocument schema for images and stores them as an array on each campground:
+</p>
+<div class="filelabel">models/campground.js</div>
+<pre><code>const ImageSchema = new Schema({
+    url: String,
+    filename: String
+});
+
+ImageSchema.virtual('thumbnail').get(function () {
+    return this.url.replace('/upload', '/upload/w_200');
+});
+
+const opts = { toJSON: { virtuals: true } };
+
+const CampgroundSchema = new Schema({
+    title: String,
+    images: [ImageSchema],
+    ...
+}, opts);</code></pre>
+<p>Each of the two stored fields has one job:</p>
+<table>
+  <tr><th>Field</th><th>Example value</th><th>Purpose</th></tr>
+  <tr>
+    <td><code>url</code></td>
+    <td><code>https://res.cloudinary.com/&lt;cloud&gt;/image/upload/v.../YelpCamp/ab12cd34.jpg</code></td>
+    <td>Delivery. Dropped into <code>&lt;img src&gt;</code> tags so the browser fetches the image from Cloudinary's CDN.</td>
+  </tr>
+  <tr>
+    <td><code>filename</code></td>
+    <td><code>YelpCamp/ab12cd34</code></td>
+    <td>Management. This is the Cloudinary public ID &mdash; the handle required to delete (or otherwise manipulate) the asset via the API later.</td>
+  </tr>
+</table>
+<p>
+Because images are embedded subdocuments rather than a separate collection, a campground and its image references are always loaded together in one query, and array operators like <code>$pull</code> can remove references atomically. The <code>toJSON: { virtuals: true }</code> option matters too: it ensures computed virtual properties (like <code>thumbnail</code>, section 5) survive <code>JSON.stringify</code>, which the show page relies on when it serializes the campground for the client-side map script.
+</p>
+
+<h2>4.1 Illustration &mdash; what MongoDB actually stores</h2>
+<p>
+Concretely, here is what a single campground document looks like inside the <code>campgrounds</code> collection after two photos have been uploaded. Notice that the <code>images</code> array contains nothing but short strings &mdash; roughly two hundred bytes per photo &mdash; no matter how large the original files were. The two highlighted fields are the two halves of the Cloudinary contract:
+</p>
+<div class="diagram-block">
+<svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A campground document as stored in MongoDB">
+  <!-- document card -->
+  <rect x="8" y="8" width="440" height="314" rx="8" fill="#f4f7f5" stroke="#2f6f4f" stroke-width="1.5"/>
+  <text x="228" y="30" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#52606d">db.campgrounds &mdash; one stored document</text>
+  <!-- field highlights (behind text) -->
+  <rect x="18" y="157" width="420" height="31" rx="3" fill="#dcebf7"/>
+  <rect x="18" y="189" width="420" height="16" rx="3" fill="#fdf3d9"/>
+  <!-- document text -->
+  <g font-family="Menlo, Consolas, monospace" font-size="9.5" fill="#1d3b2f">
+    <text x="24" y="56">{</text>
+    <text x="24" y="72">&#160;&#160;_id: ObjectId("665f1c9e2ab4f3d21c8e77a0"),</text>
+    <text x="24" y="88">&#160;&#160;title: "Misty Pines",</text>
+    <text x="24" y="104">&#160;&#160;location: "Bend, Oregon",</text>
+    <text x="24" y="120">&#160;&#160;geometry: { type: "Point", coordinates: [ -121.3, 44.05 ] },</text>
+    <text x="24" y="136">&#160;&#160;images: [</text>
+    <text x="24" y="152">&#160;&#160;&#160;&#160;{</text>
+    <text x="24" y="168">&#160;&#160;&#160;&#160;&#160;&#160;url: "https://res.cloudinary.com/&lt;cloud&gt;/image/</text>
+    <text x="24" y="184">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;upload/v1719234123/YelpCamp/ab12cd34.jpg",</text>
+    <text x="24" y="200">&#160;&#160;&#160;&#160;&#160;&#160;filename: "YelpCamp/ab12cd34"</text>
+    <text x="24" y="216">&#160;&#160;&#160;&#160;},</text>
+    <text x="24" y="232">&#160;&#160;&#160;&#160;{ url: "https://...", filename: "YelpCamp/ef56gh78" }</text>
+    <text x="24" y="248">&#160;&#160;],</text>
+    <text x="24" y="264">&#160;&#160;author: ObjectId("664a0f119cd2ab34f1e6c2b7"),</text>
+    <text x="24" y="280">&#160;&#160;reviews: [ ObjectId("..."), ObjectId("...") ]</text>
+    <text x="24" y="296">}</text>
+  </g>
+  <!-- connectors -->
+  <path d="M440,172 L455,172 L455,98 L470,98" fill="none" stroke="#1d5c8f" stroke-width="1.2"/>
+  <path d="M440,196 L455,196 L455,230 L470,230" fill="none" stroke="#c9a227" stroke-width="1.2"/>
+  <!-- callout: url -->
+  <rect x="470" y="48" width="282" height="100" rx="8" fill="#e3eef7" stroke="#1d5c8f" stroke-width="1.5"/>
+  <text x="484" y="70" font-size="10.5" font-weight="bold" fill="#1d5c8f">url &mdash; the delivery address</text>
+  <g font-size="9" fill="#1d5c8f">
+    <text x="484" y="88">The asset's public HTTPS address on</text>
+    <text x="484" y="101">Cloudinary's CDN. EJS templates drop it straight</text>
+    <text x="484" y="114">into &lt;img src&gt;. Rewriting it (/upload/w_200)</text>
+    <text x="484" y="127">is how thumbnails are requested.</text>
+  </g>
+  <!-- callout: filename -->
+  <rect x="470" y="180" width="282" height="100" rx="8" fill="#fdf6e3" stroke="#c9a227" stroke-width="1.5"/>
+  <text x="484" y="202" font-size="10.5" font-weight="bold" fill="#7a5d0e">filename &mdash; the management handle</text>
+  <g font-size="9" fill="#7a5d0e">
+    <text x="484" y="220">The Cloudinary public ID (folder + random ID).</text>
+    <text x="484" y="233">Never shown to users. Its one job: identify the</text>
+    <text x="484" y="246">asset when deleting &mdash;</text>
+    <text x="484" y="259">cloudinary.uploader.destroy(filename)</text>
+  </g>
+</svg>
+<p class="diagram-caption">The image binaries are not in this document &mdash; MongoDB holds only reference strings, while the pixels live in the Cloudinary <code>YelpCamp</code> folder.</p>
+</div>
+
+<h2>4.2 Illustration &mdash; this design vs. a SQL database</h2>
+<p>
+YelpCamp uses a <em>document</em> model: because each image belongs to exactly one campground, is only ever displayed alongside it, and the list is small and bounded, the references are <strong>embedded</strong> directly inside the campground document. A relational (SQL) database would model the same one-to-many relationship by <strong>normalizing</strong>: the image references would move into their own <code>images</code> table, tied back to the campground by a foreign key. Both designs store exactly the same two strings per photo &mdash; the difference is purely <em>where the references live</em> and how you read and modify them:
+</p>
+<div class="diagram-block">
+<svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="MongoDB embedded design compared to SQL normalized design">
+  <defs>
+    <marker id="arrowfk" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L8,4.5 L0,9 z" fill="#6b7b8c"/>
+    </marker>
+  </defs>
+  <!-- ===== left panel: MongoDB ===== -->
+  <rect x="8" y="8" width="364" height="314" rx="8" fill="#f7faf8" stroke="#2f6f4f" stroke-width="1.5"/>
+  <text x="190" y="30" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#2f6f4f">MongoDB &mdash; embedded (YelpCamp's design)</text>
+  <rect x="24" y="42" width="332" height="180" rx="6" fill="#ffffff" stroke="#9db8a8" stroke-width="1"/>
+  <rect x="30" y="99" width="320" height="76" rx="3" fill="#e6f2ea"/>
+  <g font-family="Menlo, Consolas, monospace" font-size="9.5" fill="#1d3b2f">
+    <text x="36" y="62">// campgrounds collection</text>
+    <text x="36" y="78">{ title: "Misty Pines",</text>
+    <text x="36" y="94">&#160;&#160;images: [</text>
+    <text x="36" y="110">&#160;&#160;&#160;&#160;{ url: "https://res...jpg",</text>
+    <text x="36" y="126">&#160;&#160;&#160;&#160;&#160;&#160;filename: "YelpCamp/ab12cd34" },</text>
+    <text x="36" y="142">&#160;&#160;&#160;&#160;{ url: "https://res...jpg",</text>
+    <text x="36" y="158">&#160;&#160;&#160;&#160;&#160;&#160;filename: "YelpCamp/ef56gh78" }</text>
+    <text x="36" y="174">&#160;&#160;],</text>
+    <text x="36" y="190">&#160;&#160;author: ObjectId("..."), ... }</text>
+  </g>
+  <g font-size="9.5" fill="#33463c">
+    <text x="24" y="246">&#8226; Image refs live inside the parent document.</text>
+    <text x="24" y="264">&#8226; One findById() loads campground + images.</text>
+    <text x="24" y="282">&#8226; Delete refs: one updateOne with $pull.</text>
+    <text x="24" y="300">&#8226; Shape enforced in app code (ImageSchema).</text>
+  </g>
+  <!-- ===== right panel: SQL ===== -->
+  <rect x="388" y="8" width="364" height="314" rx="8" fill="#fbfcfd" stroke="#6b7b8c" stroke-width="1.5"/>
+  <text x="570" y="30" text-anchor="middle" font-size="11.5" font-weight="bold" fill="#2c3a47">SQL &mdash; normalized (equivalent design)</text>
+  <!-- campgrounds table -->
+  <text x="404" y="54" font-size="9" font-weight="bold" fill="#2c3a47">campgrounds</text>
+  <rect x="404" y="60" width="180" height="18" fill="#dde5ec" stroke="#6b7b8c" stroke-width="1"/>
+  <rect x="404" y="78" width="180" height="18" fill="#ffffff" stroke="#6b7b8c" stroke-width="1"/>
+  <line x1="440" y1="60" x2="440" y2="96" stroke="#6b7b8c" stroke-width="1"/>
+  <g font-size="8.5" fill="#2c3a47">
+    <text x="422" y="72" text-anchor="middle" font-weight="bold">id</text>
+    <text x="512" y="72" text-anchor="middle" font-weight="bold">title</text>
+    <text x="422" y="90" text-anchor="middle">17</text>
+    <text x="512" y="90" text-anchor="middle">Misty Pines</text>
+  </g>
+  <!-- FK arrow -->
+  <path d="M474,128 C474,112 452,112 438,100" fill="none" stroke="#6b7b8c" stroke-width="1.2" marker-end="url(#arrowfk)"/>
+  <text x="486" y="114" font-size="8" font-style="italic" fill="#6b7b8c">FOREIGN KEY</text>
+  <!-- images table -->
+  <text x="404" y="124" font-size="9" font-weight="bold" fill="#2c3a47">images</text>
+  <rect x="404" y="130" width="336" height="18" fill="#dde5ec" stroke="#6b7b8c" stroke-width="1"/>
+  <rect x="404" y="148" width="336" height="18" fill="#ffffff" stroke="#6b7b8c" stroke-width="1"/>
+  <rect x="404" y="166" width="336" height="18" fill="#ffffff" stroke="#6b7b8c" stroke-width="1"/>
+  <line x1="430" y1="130" x2="430" y2="184" stroke="#6b7b8c" stroke-width="1"/>
+  <line x1="518" y1="130" x2="518" y2="184" stroke="#6b7b8c" stroke-width="1"/>
+  <line x1="628" y1="130" x2="628" y2="184" stroke="#6b7b8c" stroke-width="1"/>
+  <g font-size="8" fill="#2c3a47">
+    <text x="417" y="142" text-anchor="middle" font-weight="bold">id</text>
+    <text x="474" y="142" text-anchor="middle" font-weight="bold">campground_id</text>
+    <text x="573" y="142" text-anchor="middle" font-weight="bold">url</text>
+    <text x="684" y="142" text-anchor="middle" font-weight="bold">filename</text>
+    <text x="417" y="160" text-anchor="middle">1</text>
+    <text x="474" y="160" text-anchor="middle">17</text>
+    <text x="573" y="160" text-anchor="middle">https://.../ab12cd34.jpg</text>
+    <text x="684" y="160" text-anchor="middle">YelpCamp/ab12cd34</text>
+    <text x="417" y="178" text-anchor="middle">2</text>
+    <text x="474" y="178" text-anchor="middle">17</text>
+    <text x="573" y="178" text-anchor="middle">https://.../ef56gh78.jpg</text>
+    <text x="684" y="178" text-anchor="middle">YelpCamp/ef56gh78</text>
+  </g>
+  <g font-size="9.5" fill="#3c4854">
+    <text x="404" y="246">&#8226; Image rows live in a separate table.</text>
+    <text x="404" y="264">&#8226; Read: JOIN images ON campground_id = id.</text>
+    <text x="404" y="282">&#8226; Delete: DELETE FROM images WHERE ... IN (...).</text>
+    <text x="404" y="300">&#8226; Shape enforced by columns &amp; constraints.</text>
+  </g>
+</svg>
+<p class="diagram-caption">Same data, two shapes: MongoDB nests the image references inside the campground; SQL splits them into a child table joined by a foreign key.</p>
+</div>
+<p>Operation by operation, here is how the two designs compare for this app's image handling:</p>
+<table>
+  <tr><th>Operation</th><th>MongoDB &mdash; embedded (YelpCamp)</th><th>SQL &mdash; normalized</th></tr>
+  <tr>
+    <td>Load a campground with its photos</td>
+    <td>One query: <code>Campground.findById(id)</code> &mdash; images arrive embedded in the document.</td>
+    <td>A <code>JOIN</code> onto the <code>images</code> table (or a second query per campground).</td>
+  </tr>
+  <tr>
+    <td>Add photos after upload</td>
+    <td><code>campground.images.push(...imgs)</code> then <code>save()</code>.</td>
+    <td><code>INSERT INTO images (campground_id, url, filename) VALUES ...</code> one row per photo.</td>
+  </tr>
+  <tr>
+    <td>Remove selected photos</td>
+    <td>One update: <code>$pull</code> matching filenames out of the array.</td>
+    <td><code>DELETE FROM images WHERE campground_id = ? AND filename IN (...)</code>.</td>
+  </tr>
+  <tr>
+    <td>Data shape / integrity</td>
+    <td>Defined in application code by Mongoose's <code>ImageSchema</code>; the database itself is schemaless.</td>
+    <td>Enforced by the database: column types, <code>NOT NULL</code>, and the foreign-key constraint.</td>
+  </tr>
+  <tr>
+    <td>The image binary itself</td>
+    <td colspan="2">Identical in both designs: never in the database. Only the two reference strings are stored; the file lives on Cloudinary. (Databases <em>can</em> hold binaries &mdash; BLOB columns, GridFS &mdash; but that bloats them and forfeits Cloudinary's CDN and transformations.)</td>
+  </tr>
+</table>
+<p>
+Embedding is the right call here because the images are a small, bounded list read exclusively through their parent campground. The trade-off to acknowledge if asked: embedded data is harder to query <em>across</em> parents (e.g. "list every image in the system" means unwinding arrays, where SQL would just scan the <code>images</code> table), and a document has a 16&nbsp;MB cap &mdash; irrelevant at a few hundred bytes per image reference.
+</p>
+
+<h2>5. Displaying images</h2>
+<p>
+Display is deliberately simple: the app never proxies image bytes. EJS templates emit <code>&lt;img&gt;</code> tags whose <code>src</code> points at Cloudinary, and the user's browser downloads each image <em>directly from Cloudinary's CDN</em> &mdash; the Express server is not involved in serving pixels.
+</p>
+<h3>Full-size images (show page carousel)</h3>
+<p>
+<code>views/campgrounds/show.ejs</code> loops over <code>campground.images</code> inside a Bootstrap carousel and uses the stored URL as-is; the previous/next controls render only when there is more than one image:
+</p>
+<div class="filelabel">views/campgrounds/show.ejs</div>
+<pre><code>&lt;% campground.images.forEach((img, i) =&gt; { %&gt;
+    &lt;div class="carousel-item &lt;%= i === 0 ? 'active' : '' %&gt;"&gt;
+        &lt;img class="d-block w-100" src="&lt;%= img.url %&gt;" alt=""&gt;
+    &lt;/div&gt;
+&lt;% }) %&gt;</code></pre>
+<h3>On-the-fly thumbnails via URL transformation (edit page)</h3>
+<p>
+Cloudinary supports <em>URL-based transformations</em>: modifying the delivery URL itself instructs Cloudinary to derive a new version of the image on the fly (and cache it). YelpCamp uses exactly one such transformation, defined as the <code>thumbnail</code> virtual on <code>ImageSchema</code>:
+</p>
+<pre><code>ImageSchema.virtual('thumbnail').get(function () {
+    return this.url.replace('/upload', '/upload/w_200');
+});</code></pre>
+<p>
+Inserting the <code>w_200</code> segment after <code>/upload</code> asks Cloudinary for a 200-pixel-wide rendition. Nothing extra is stored &mdash; it is a computed property derived from <code>url</code> whenever it is read. The edit page uses it so users can review existing photos as small thumbnails while deciding which to delete:
+</p>
+<div class="filelabel">views/campgrounds/edit.ejs</div>
+<pre><code>&lt;img src="&lt;%= img.thumbnail %&gt;" class="img-thumbnail" alt=""&gt;</code></pre>
+<h3>Index page with fallback</h3>
+<p>
+The campground list (<code>views/campgrounds/index.ejs</code>) shows each campground's first image, <code>campground.images[0].url</code>. If a campground has no images at all, it falls back to a hardcoded default image URL that also lives in the Cloudinary <code>YelpCamp</code> folder, so every card always has a picture.
+</p>
+
+<h2>6. Deleting images</h2>
+<p>
+Image deletion happens through the <strong>edit form</strong>. Next to each existing thumbnail, the template renders a "Delete?" checkbox whose <code>name</code> is <code>deleteImages[]</code> and whose <code>value</code> is that image's <code>filename</code> &mdash; the Cloudinary public ID:
+</p>
+<div class="filelabel">views/campgrounds/edit.ejs</div>
+<pre><code>&lt;% campground.images.forEach(function(img, i) { %&gt;
+    &lt;img src="&lt;%= img.thumbnail %&gt;" class="img-thumbnail" alt=""&gt;
+    &lt;div class="form-check-inline"&gt;
+        &lt;input type="checkbox" id="image-&lt;%= i %&gt;" name="deleteImages[]" value="&lt;%= img.filename %&gt;"&gt;
+    &lt;/div&gt;
+    &lt;label for="image-&lt;%= i %&gt;"&gt;Delete?&lt;/label&gt;
+&lt;% }) %&gt;</code></pre>
+<p>
+When the form is submitted (a PUT to <code>/campgrounds/:id</code>), the checked values arrive as the array <code>req.body.deleteImages</code>. The <code>updateCampground</code> controller then performs a <strong>two-step, two-system deletion</strong>:
+</p>
+<div class="filelabel">controllers/campgrounds.js &mdash; updateCampground</div>
+<pre><code>if (req.body.deleteImages) {
+    for (let filename of req.body.deleteImages) {
+        await cloudinary.uploader.destroy(filename);
+    }
+    await campground.updateOne({ $pull: { images: { filename: { $in: req.body.deleteImages } } } });
+}</code></pre>
+<ol>
+  <li><strong>Cloudinary first:</strong> <code>cloudinary.uploader.destroy(filename)</code> is called once per selected image. This is an authenticated API call (using the credentials from section 2) that permanently removes the binary asset from the Cloudinary account. This is exactly why <code>filename</code> was stored at upload time &mdash; it is the only handle Cloudinary accepts for deletion.</li>
+  <li><strong>Then MongoDB:</strong> a single <code>updateOne</code> with the <code>$pull</code> operator removes every embedded image subdocument whose <code>filename</code> is in the submitted list, keeping the database in sync so dead URLs are never rendered.</li>
+</ol>
+
+<h2>7. The combined edit flow</h2>
+<p>
+The update route composes everything above into one request. Its middleware chain mirrors the create route, with an added ownership check:
+</p>
+<div class="filelabel">routes/campgrounds.js</div>
+<pre><code>router.route('/:id')
+    .put(isLoggedIn, isAuthor, upload.array('image'), validateCampground, catchAsync(campgrounds.updateCampground))</code></pre>
+<p>A single PUT submission can therefore simultaneously:</p>
+<ul>
+  <li><strong>Add images</strong> &mdash; new files chosen in the edit form's file input are uploaded to Cloudinary by <code>upload.array('image')</code>, and the controller pushes the resulting <code>{ url, filename }</code> pairs onto the existing array: <code>campground.images.push(...imgs)</code>.</li>
+  <li><strong>Remove images</strong> &mdash; any checked <code>deleteImages[]</code> entries are destroyed on Cloudinary and <code>$pull</code>-ed from Mongo, as described in section 6.</li>
+  <li><strong>Update text fields</strong> &mdash; via <code>Campground.findByIdAndUpdate(id, { ...req.body.campground })</code>.</li>
+</ul>
+
+<h2>8. Limitations and honest caveats</h2>
+<div class="callout">
+<strong>Orphaned assets on campground deletion.</strong> Deleting an entire campground calls <code>Campground.findByIdAndDelete(id)</code>, and a <code>findOneAndDelete</code> post-hook on the model cascades deletion of the campground's reviews &mdash; but nothing in that path calls Cloudinary. The campground's images therefore remain in the Cloudinary account as orphaned assets. The clean fix would be to extend the post-hook (or the <code>deleteCampground</code> controller) to loop over <code>doc.images</code> and call <code>cloudinary.uploader.destroy(img.filename)</code> for each.
+</div>
+<div class="callout">
+<strong>Upload happens before validation.</strong> Because <code>upload.array('image')</code> must run before <code>validateCampground</code> (multer is what parses the multipart body that validation needs to read), files are already on Cloudinary by the time validation runs. If validation then rejects the request, the uploaded files are not cleaned up. Format restrictions (<code>jpeg/png/jpg</code>) are enforced by the storage engine itself, but there is no file-count or file-size cap configured on multer.
+</div>
+
+<!-- ==================== DIAGRAM PAGE ==================== -->
+<section class="diagram-page">
+<h2>9. Diagram: the media lifecycle</h2>
+<p>
+Three flows, one shared principle: <span style="color:#1d5c8f; font-weight:bold;">Cloudinary stores the binary media</span>; <span style="color:#2f6f4f; font-weight:bold;">MongoDB stores only the <code>{ url, filename }</code> references</span>; the Express app coordinates both, and the browser fetches pixels straight from Cloudinary's CDN.
+</p>
+
+<div class="diagram-block">
+<h3>Flow 1 &mdash; Upload &amp; Store</h3>
+<svg viewBox="0 0 760 235" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Upload and store flow diagram">
+  <defs>
+    <marker id="arrow1" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L8,4.5 L0,9 z" fill="#4a5761"/>
+    </marker>
+  </defs>
+  <!-- top row -->
+  <rect x="8" y="18" width="216" height="64" rx="8" fill="#f1ede4" stroke="#a89968" stroke-width="1.5"/>
+  <text x="116" y="42" text-anchor="middle" font-size="12" font-weight="bold" fill="#5d5232">Browser &mdash; new/edit form</text>
+  <text x="116" y="58" text-anchor="middle" font-size="10" fill="#5d5232">multipart/form-data POST</text>
+  <text x="116" y="72" text-anchor="middle" font-size="10" fill="#5d5232">&lt;input type="file" name="image" multiple&gt;</text>
+
+  <line x1="228" y1="50" x2="264" y2="50" stroke="#4a5761" stroke-width="1.5" marker-end="url(#arrow1)"/>
+
+  <rect x="270" y="18" width="216" height="64" rx="8" fill="#eef1f4" stroke="#6b7b8c" stroke-width="1.5"/>
+  <text x="378" y="42" text-anchor="middle" font-size="12" font-weight="bold" fill="#2c3a47">Express route middleware</text>
+  <text x="378" y="58" text-anchor="middle" font-size="10" fill="#2c3a47">upload.array('image')</text>
+  <text x="378" y="72" text-anchor="middle" font-size="10" fill="#2c3a47">multer + CloudinaryStorage</text>
+
+  <line x1="490" y1="50" x2="526" y2="50" stroke="#4a5761" stroke-width="1.5" marker-end="url(#arrow1)"/>
+  <text x="508" y="11" text-anchor="middle" font-size="9" fill="#4a5761">streams file</text>
+
+  <rect x="532" y="18" width="220" height="64" rx="8" fill="#e3eef7" stroke="#1d5c8f" stroke-width="2"/>
+  <text x="642" y="42" text-anchor="middle" font-size="12" font-weight="bold" fill="#1d5c8f">CLOUDINARY</text>
+  <text x="642" y="58" text-anchor="middle" font-size="10" fill="#1d5c8f">stores binary in 'YelpCamp' folder</text>
+  <text x="642" y="72" text-anchor="middle" font-size="10" fill="#1d5c8f">(jpeg / png / jpg only)</text>
+
+  <!-- down from cloudinary -->
+  <line x1="642" y1="86" x2="642" y2="140" stroke="#4a5761" stroke-width="1.5" marker-end="url(#arrow1)"/>
+  <text x="632" y="118" text-anchor="end" font-size="9" fill="#4a5761">responds with asset details</text>
+
+  <!-- bottom row (right to left) -->
+  <rect x="532" y="146" width="220" height="64" rx="8" fill="#eef1f4" stroke="#6b7b8c" stroke-width="1.5"/>
+  <text x="642" y="170" text-anchor="middle" font-size="12" font-weight="bold" fill="#2c3a47">req.files</text>
+  <text x="642" y="186" text-anchor="middle" font-size="10" fill="#2c3a47">path = delivery URL</text>
+  <text x="642" y="200" text-anchor="middle" font-size="10" fill="#2c3a47">filename = public ID</text>
+
+  <line x1="526" y1="178" x2="490" y2="178" stroke="#4a5761" stroke-width="1.5" marker-end="url(#arrow1)"/>
+
+  <rect x="270" y="146" width="216" height="64" rx="8" fill="#eef1f4" stroke="#6b7b8c" stroke-width="1.5"/>
+  <text x="378" y="170" text-anchor="middle" font-size="12" font-weight="bold" fill="#2c3a47">Controller maps references</text>
+  <text x="378" y="188" text-anchor="middle" font-size="9.5" fill="#2c3a47">req.files.map(f =&gt; ({ url: f.path,</text>
+  <text x="378" y="201" text-anchor="middle" font-size="9.5" fill="#2c3a47">filename: f.filename }))</text>
+
+  <line x1="264" y1="178" x2="228" y2="178" stroke="#4a5761" stroke-width="1.5" marker-end="url(#arrow1)"/>
+  <text x="246" y="168" text-anchor="middle" font-size="9" fill="#4a5761">save()</text>
+
+  <rect x="8" y="146" width="216" height="64" rx="8" fill="#e6f2ea" stroke="#2f6f4f" stroke-width="2"/>
+  <text x="116" y="170" text-anchor="middle" font-size="12" font-weight="bold" fill="#2f6f4f">MONGODB</text>
+  <text x="116" y="186" text-anchor="middle" font-size="10" fill="#2f6f4f">campground.images = [</text>
+  <text x="116" y="200" text-anchor="middle" font-size="10" fill="#2f6f4f">{ url, filename }, ... ]</text>
+</svg>
+<p class="diagram-caption">Files are uploaded to Cloudinary by the multer middleware before the controller runs; MongoDB receives only the returned URL and public ID.</p>
+</div>
+
+<div class="diagram-block">
+<h3>Flow 2 &mdash; Render / Display</h3>
+<svg viewBox="0 0 760 235" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Render flow diagram">
+  <defs>
+    <marker id="arrow2" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L8,4.5 L0,9 z" fill="#4a5761"/>
+    </marker>
+  </defs>
+  <!-- top row -->
+  <rect x="8" y="18" width="216" height="64" rx="8" fill="#e6f2ea" stroke="#2f6f4f" stroke-width="2"/>
+  <text x="116" y="42" text-anchor="middle" font-size="12" font-weight="bold" fill="#2f6f4f">MONGODB</text>
+  <text x="116" y="58" text-anchor="middle" font-size="10" fill="#2f6f4f">campground loaded with its</text>
+  <text x="116" y="72" text-anchor="middle" font-size="10" fill="#2f6f4f">embedded images [ { url, filename } ]</text>
+
+  <line x1="228" y1="50" x2="264" y2="50" stroke="#4a5761" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+  <rect x="270" y="18" width="216" height="64" rx="8" fill="#eef1f4" stroke="#6b7b8c" stroke-width="1.5"/>
+  <text x="378" y="42" text-anchor="middle" font-size="12" font-weight="bold" fill="#2c3a47">EJS template renders HTML</text>
+  <text x="378" y="58" text-anchor="middle" font-size="10" fill="#2c3a47">show: img.url (full size)</text>
+  <text x="378" y="72" text-anchor="middle" font-size="10" fill="#2c3a47">edit: img.thumbnail (w_200 virtual)</text>
+
+  <line x1="490" y1="50" x2="526" y2="50" stroke="#4a5761" stroke-width="1.5" marker-end="url(#arrow2)"/>
+  <text x="508" y="11" text-anchor="middle" font-size="9" fill="#4a5761">HTML page</text>
+
+  <rect x="532" y="18" width="220" height="64" rx="8" fill="#f1ede4" stroke="#a89968" stroke-width="1.5"/>
+  <text x="642" y="42" text-anchor="middle" font-size="12" font-weight="bold" fill="#5d5232">Browser parses page</text>
+  <text x="642" y="58" text-anchor="middle" font-size="10" fill="#5d5232">finds &lt;img src="https://</text>
+  <text x="642" y="72" text-anchor="middle" font-size="10" fill="#5d5232">res.cloudinary.com/..."&gt;</text>
+
+  <!-- down -->
+  <line x1="642" y1="86" x2="642" y2="140" stroke="#4a5761" stroke-width="1.5" marker-end="url(#arrow2)"/>
+  <text x="632" y="118" text-anchor="end" font-size="9" fill="#4a5761">requests image directly</text>
+
+  <rect x="532" y="146" width="220" height="64" rx="8" fill="#e3eef7" stroke="#1d5c8f" stroke-width="2"/>
+  <text x="642" y="170" text-anchor="middle" font-size="12" font-weight="bold" fill="#1d5c8f">CLOUDINARY CDN</text>
+  <text x="642" y="186" text-anchor="middle" font-size="10" fill="#1d5c8f">serves original, or generates</text>
+  <text x="642" y="200" text-anchor="middle" font-size="10" fill="#1d5c8f">200px-wide version for /upload/w_200</text>
+
+  <line x1="526" y1="178" x2="490" y2="178" stroke="#4a5761" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+  <rect x="270" y="146" width="216" height="64" rx="8" fill="#f1ede4" stroke="#a89968" stroke-width="1.5"/>
+  <text x="378" y="174" text-anchor="middle" font-size="12" font-weight="bold" fill="#5d5232">Browser displays image</text>
+  <text x="378" y="192" text-anchor="middle" font-size="10" fill="#5d5232">Express never touches the pixels</text>
+</svg>
+<p class="diagram-caption">The Express server only embeds URLs into HTML; image bytes travel directly from Cloudinary's CDN to the user's browser.</p>
+</div>
+
+<div class="diagram-block">
+<h3>Flow 3 &mdash; Delete</h3>
+<svg viewBox="0 0 760 235" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Delete flow diagram">
+  <defs>
+    <marker id="arrow3" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L8,4.5 L0,9 z" fill="#4a5761"/>
+    </marker>
+  </defs>
+  <!-- top row -->
+  <rect x="8" y="18" width="216" height="64" rx="8" fill="#f1ede4" stroke="#a89968" stroke-width="1.5"/>
+  <text x="116" y="42" text-anchor="middle" font-size="12" font-weight="bold" fill="#5d5232">Browser &mdash; edit form</text>
+  <text x="116" y="58" text-anchor="middle" font-size="10" fill="#5d5232">"Delete?" checkboxes:</text>
+  <text x="116" y="72" text-anchor="middle" font-size="10" fill="#5d5232">deleteImages[] = filename (public ID)</text>
+
+  <line x1="228" y1="50" x2="264" y2="50" stroke="#4a5761" stroke-width="1.5" marker-end="url(#arrow3)"/>
+  <text x="246" y="40" text-anchor="middle" font-size="9" fill="#4a5761">PUT</text>
+
+  <rect x="270" y="18" width="216" height="64" rx="8" fill="#eef1f4" stroke="#6b7b8c" stroke-width="1.5"/>
+  <text x="378" y="42" text-anchor="middle" font-size="12" font-weight="bold" fill="#2c3a47">updateCampground controller</text>
+  <text x="378" y="58" text-anchor="middle" font-size="10" fill="#2c3a47">reads req.body.deleteImages</text>
+  <text x="378" y="72" text-anchor="middle" font-size="10" fill="#2c3a47">(after isLoggedIn + isAuthor checks)</text>
+
+  <line x1="490" y1="50" x2="526" y2="50" stroke="#4a5761" stroke-width="1.5" marker-end="url(#arrow3)"/>
+  <text x="642" y="11" text-anchor="middle" font-size="9" fill="#4a5761">step 1: uploader.destroy(filename), once per file</text>
+
+  <rect x="532" y="18" width="220" height="64" rx="8" fill="#e3eef7" stroke="#1d5c8f" stroke-width="2"/>
+  <text x="642" y="42" text-anchor="middle" font-size="12" font-weight="bold" fill="#1d5c8f">CLOUDINARY</text>
+  <text x="642" y="58" text-anchor="middle" font-size="10" fill="#1d5c8f">binary asset permanently</text>
+  <text x="642" y="72" text-anchor="middle" font-size="10" fill="#1d5c8f">removed from account</text>
+
+  <!-- second arrow from controller down-left to mongo -->
+  <line x1="378" y1="86" x2="378" y2="140" stroke="#4a5761" stroke-width="1.5" marker-end="url(#arrow3)"/>
+  <text x="388" y="106" font-size="9" fill="#4a5761">step 2: $pull matching</text>
+  <text x="388" y="118" font-size="9" fill="#4a5761">subdocs by filename</text>
+
+  <rect x="270" y="146" width="216" height="64" rx="8" fill="#e6f2ea" stroke="#2f6f4f" stroke-width="2"/>
+  <text x="378" y="170" text-anchor="middle" font-size="12" font-weight="bold" fill="#2f6f4f">MONGODB</text>
+  <text x="378" y="186" text-anchor="middle" font-size="10" fill="#2f6f4f">{ $pull: { images: { filename:</text>
+  <text x="378" y="200" text-anchor="middle" font-size="10" fill="#2f6f4f">{ $in: deleteImages } } } }</text>
+
+  <rect x="532" y="146" width="220" height="64" rx="8" fill="#fdf6e3" stroke="#c9a227" stroke-width="1.5"/>
+  <text x="642" y="170" text-anchor="middle" font-size="11" font-weight="bold" fill="#7a5d0e">Known gap</text>
+  <text x="642" y="186" text-anchor="middle" font-size="9.5" fill="#7a5d0e">Deleting a whole campground skips</text>
+  <text x="642" y="199" text-anchor="middle" font-size="9.5" fill="#7a5d0e">Cloudinary &rarr; assets are orphaned</text>
+</svg>
+<p class="diagram-caption">Deletion is two-phase: destroy the asset on Cloudinary using its stored public ID, then pull the reference out of the MongoDB array.</p>
+</div>
+
+<footer>
+YelpCamp &mdash; Cloudinary media lifecycle documentation. Source files referenced: cloudinary/index.js, routes/campgrounds.js, controllers/campgrounds.js, models/campground.js, views/campgrounds/{new,show,edit,index}.ejs
+</footer>
+
+</section>
+</body>
+</html>
