@@ -35,6 +35,7 @@ mongoose.connection.on("error", console.error.bind(console, "connection error:")
 mongoose.connection.once("open", () => console.log("Database connected"));
 
 const app = express();
+app.set('trust proxy', 1);
 app.set('query parser', 'extended');
 
 app.engine('ejs', ejsMate)
@@ -59,14 +60,15 @@ const store = MongoStore.create({
 
 
 const sessionConfig = {
+    store,
     name: 'session',
     secret,
     resave: false,
-    saveUninitialized: true,
+    saveUninitialized: false,
     cookie: {
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
-        expires: Date.now() + 1000 * 60 * 60 * 24 * 7,
+        sameSite: 'lax',
         maxAge: 1000 * 60 * 60 * 24 * 7
     }
 }
